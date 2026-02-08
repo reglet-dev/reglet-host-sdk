@@ -11,3 +11,10 @@ func WithHostFunctions(registry *hostlib.HandlerRegistry) Option {
 		e.registry = registry
 	}
 }
+
+// WithVerbose enables or disables verbose logging from the WASM runtime and plugins.
+func WithVerbose(verbose bool) Option {
+	return func(e *Executor) {
+		e.verbose = verbose
+	}
+}

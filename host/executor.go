@@ -19,6 +19,7 @@ import (
 type Executor struct {
 	runtime  t_wazero.Runtime
 	registry *hostlib.HandlerRegistry
+	verbose  bool
 }
 
 // NewExecutor creates a new executor with the given options.
@@ -77,7 +78,9 @@ func (e *Executor) registerHostFunctions(ctx context.Context) error {
 			}
 
 			// For now, print to stderr. In a real scenario, this would integrate with a logger.
-			fmt.Fprintf(os.Stderr, "WASM Log [%s]: %s\n", logMsg.Level, logMsg.Message)
+			if e.verbose {
+				fmt.Fprintf(os.Stderr, "WASM Log [%s]: %s\n", logMsg.Level, logMsg.Message)
+			}
 		}),
 	}
 
@@ -116,21 +119,46 @@ func (e *Executor) LoadPlugin(ctx context.Context, wasmBytes []byte) (*PluginIns
 
 // Manifest returns the plugin manifest.
 func (p *PluginInstance) Manifest(ctx context.Context) (abi.Manifest, error) {
-	var manifest abi.Manifest
-	packed, err := p.callRaw(ctx, "manifest", nil)
-	if err != nil {
-		return manifest, err
+	fn := p.module.ExportedFunction("_manifest")
+	if fn == nil {
+		return abi.Manifest{}, fmt.Errorf("function \"_manifest\" not found")
 	}
-	err = p.unmarshalPacked(packed, &manifest)
+
+	res, err := fn.Call(ctx)
+	if err != nil {
+		return abi.Manifest{}, fmt.Errorf("calling _manifest: %w", err)
+	}
+
+	if len(res) == 0 {
+		return abi.Manifest{}, fmt.Errorf("_manifest returned no results")
+	}
+
+	var manifest abi.Manifest
+	err = p.unmarshalPacked(res[0], &manifest)
 	return manifest, err
 }
 
-// Schema calls the "schema" export of the plugin.
+// Schema calls the "_schema" export of the plugin.
 func (p *PluginInstance) Schema(ctx context.Context) ([]byte, error) {
-	packed, err := p.callRaw(ctx, "schema", nil)
-	if err != nil {
-		return nil, err
+	fn := p.module.ExportedFunction("_schema")
+	if fn == nil {
+		// Fallback for older plugins
+		fn = p.module.ExportedFunction("schema")
 	}
+	if fn == nil {
+		return nil, fmt.Errorf("schema function not found")
+	}
+
+	res, err := fn.Call(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("calling schema: %w", err)
+	}
+
+	if len(res) == 0 {
+		return nil, fmt.Errorf("schema returned no results")
+	}
+
+	packed := res[0]
 	//nolint:gosec // WASM pointers are always 32-bit
 	ptr := uint32(packed >> 32)
 	//nolint:gosec // WASM lengths are always 32-bit
@@ -145,60 +173,46 @@ func (p *PluginInstance) Schema(ctx context.Context) ([]byte, error) {
 	return schemaCopy, nil
 }
 
-// Check calls the "observe" export of the plugin.
+// Check calls the "_observe" export of the plugin.
 func (p *PluginInstance) Check(ctx context.Context, config map[string]any) (abi.Result, error) {
 	configBytes, err := json.Marshal(config)
 	if err != nil {
 		return abi.Result{}, err
 	}
 
-	packed, err := p.callRaw(ctx, "observe", configBytes)
+	fn := p.module.ExportedFunction("_observe")
+	if fn == nil {
+		return abi.Result{}, fmt.Errorf("function \"_observe\" not found")
+	}
+
+	// Allocate memory for config
+	allocate := p.module.ExportedFunction("allocate")
+	if allocate == nil {
+		return abi.Result{}, fmt.Errorf("function 'allocate' not exported")
+	}
+	ares, err := allocate.Call(ctx, uint64(len(configBytes)))
 	if err != nil {
-		return abi.Result{}, err
+		return abi.Result{}, fmt.Errorf("allocate failed: %w", err)
+	}
+	ptr := ares[0]
+
+	if !p.module.Memory().Write(uint32(ptr), configBytes) {
+		return abi.Result{}, fmt.Errorf("failed to write input to memory")
+	}
+
+	// Call _observe(ptr, len)
+	res, err := fn.Call(ctx, ptr, uint64(len(configBytes)))
+	if err != nil {
+		return abi.Result{}, fmt.Errorf("calling _observe: %w", err)
+	}
+
+	if len(res) == 0 {
+		return abi.Result{}, fmt.Errorf("_observe returned no results")
 	}
 
 	var result abi.Result
-	err = p.unmarshalPacked(packed, &result)
+	err = p.unmarshalPacked(res[0], &result)
 	return result, err
-}
-
-// callRaw invokes a plugin function with raw bytes.
-func (p *PluginInstance) callRaw(ctx context.Context, name string, input []byte) (uint64, error) {
-	fn := p.module.ExportedFunction(name)
-	if fn == nil {
-		return 0, fmt.Errorf("function %q not found", name)
-	}
-
-	// Allocate memory for input if needed
-	var ptr uint64
-	var length uint64
-	if len(input) > 0 {
-		allocate := p.module.ExportedFunction("allocate")
-		if allocate == nil {
-			return 0, fmt.Errorf("function 'allocate' not exported")
-		}
-		res, err := allocate.Call(ctx, uint64(len(input)))
-		if err != nil {
-			return 0, fmt.Errorf("allocate failed: %w", err)
-		}
-		ptr = res[0]
-		length = uint64(len(input))
-
-		if !p.module.Memory().Write(uint32(ptr), input) {
-			return 0, fmt.Errorf("failed to write input to memory")
-		}
-	}
-
-	// Pack ptr and length
-	packedInput := (ptr << 32) | length
-
-	// Call function
-	res, err := fn.Call(ctx, packedInput)
-	if err != nil {
-		return 0, fmt.Errorf("call failed: %w", err)
-	}
-
-	return res[0], nil
 }
 
 // unmarshalPacked reads JSON from packed ptr+len and unmarshals it.
