@@ -20,7 +20,7 @@ type Executor struct {
 	runtime  t_wazero.Runtime
 	registry *hostlib.HandlerRegistry
 	verbose  bool
-	cache    t_wazero.CompilationCache
+	cache    CompilationCache
 }
 
 // NewExecutor creates a new executor with the given options.
@@ -41,7 +41,11 @@ func NewExecutor(ctx context.Context, opts ...Option) (*Executor, error) {
 
 	config := t_wazero.NewRuntimeConfig()
 	if e.cache != nil {
-		config = config.WithCompilationCache(e.cache)
+		if adapter, ok := e.cache.(*wazeroCacheAdapter); ok {
+			config = config.WithCompilationCache(adapter.inner)
+		} else if wc, ok := e.cache.(t_wazero.CompilationCache); ok {
+			config = config.WithCompilationCache(wc)
+		}
 	}
 
 	rt := t_wazero.NewRuntimeWithConfig(ctx, config)

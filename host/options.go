@@ -2,7 +2,6 @@ package host
 
 import (
 	hostlib "github.com/reglet-dev/reglet-host-sdk"
-	"github.com/tetratelabs/wazero"
 )
 
 // Option defines a functional option for configuring the Executor.
@@ -23,7 +22,7 @@ func WithVerbose(verbose bool) Option {
 }
 
 // WithCompilationCache configures the executor with a compilation cache.
-func WithCompilationCache(cache wazero.CompilationCache) Option {
+func WithCompilationCache(cache CompilationCache) Option {
 	return func(e *Executor) {
 		e.cache = cache
 	}
